@@ -2,15 +2,23 @@ import aiohttp
 import asyncio
 import itertools
 from spacy.language import Language
-from spacy.tokens import Span
+from spacy.tokens import Span, Doc
 
 class NaturalLanguage:
     def __init__(self, token, lang, concurrent_connections):
-        self.url = "https://nl.diffbot.com/v1/?fields=entities,facts&token={}".format(token)
+        self.url = "https://nl.diffbot.com/v1/?fields=entities,facts,sentiment&token={}".format(token)
         self.concurrent_connections = concurrent_connections
         self.lang = lang
         if not Span.has_extension("uris"):
             Span.set_extension("uris", default=[])
+        if not Doc.has_extension("coref_clusters"):
+            Doc.set_extension("coref_clusters", default=[])
+        if not Doc.has_extension("sentiment"):
+            Doc.set_extension("sentiment", default=None)
+        if not Span.has_extension("coref_cluster_id"):
+            Span.set_extension("coref_cluster_id", default=[])
+        if not Span.has_extension("coref_cluster"):
+            Span.set_extension("coref_cluster", getter=self.span_cluster)
     
     def __call__(self, doc):
         return next(self.pipe([doc], 1))
@@ -51,6 +59,7 @@ class NaturalLanguage:
                 for mention in entity["mentions"]:
                     ent = doc.char_span(mention["beginOffset"], mention["endOffset"], label=label, kb_id=kb_id, alignment_mode="expand")
                     ent._.uris = uris
+                    ent._.coref_cluster_id = cluster_id
                     overlapping = False
                     for i in range(ent.start, ent.end):
                         if i in seen_tokens:
@@ -58,7 +67,19 @@ class NaturalLanguage:
                         seen_tokens.add(i)
                     if not overlapping:
                         ents.append(ent)
+                cluster = {
+                    "id": cluster_id,
+                    "name": entity.get("name", None),
+                    "diffbotUri": entity.get("diffbotUri", None),
+                    "uris": entity.get("allUris", []),
+                    "types": entity.get("allTypes", []),
+                    "sentiment": entity.get("sentiment", None),
+                    "salience": entity.get("salience", None),
+                }
+                doc._.coref_clusters.append(cluster)
             doc.set_ents(ents, default="outside")
+            if "sentiment" in response:
+                doc._.sentiment = response["sentiment"]
         return doc
 
     async def _request_json(self, session, text, tries=3):
@@ -81,10 +102,18 @@ class NaturalLanguage:
             await asyncio.sleep(1 if tries == 3 else 10)
             return await self._request_json(session, text, tries-1)
 
+    def span_cluster(self, span):
+        """Returns the cluster the span is in.
+        """
+        for cluster in span.doc._.coref_clusters:
+            if span._.coref_cluster_id == cluster["id"]:
+                return cluster
+        return None
+
 
 @Language.factory(
     "diffbot",
-    assigns=["doc.ents", "token.ent_iob", "token.ent_type"],
+    assigns=["doc.ents", "doc.sentiment", "token.ent_iob", "token.ent_type"],
     default_config={
         "lang": "en",
         "concurrent_connections": 10
